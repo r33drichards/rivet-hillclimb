@@ -41,11 +41,11 @@
   },
   {
     "id": "06",
-    "title": "Conflicts and finite limits",
-    "text": "A confirmed merge conflict can also wake the runner to resolve it. Work stays bounded: three attempts per failure, ten fix iterations overall. Infrastructure and missing secret failures are reported rather than disguised as code fixes.",
-    "duration": 19,
+    "title": "Conflicts wake the runner",
+    "text": "A confirmed merge conflict can also wake the runner. It fetches the current base, resolves the conflicting files, and pushes the repaired branch. GitHub Actions then supplies fresh feedback. There is no fixed attempt count; the owner can stop the loop at any time. Infrastructure and missing secret failures are reported rather than disguised as code fixes.",
+    "duration": 26,
     "audio": "audio/06.mp3",
-    "audioDuration": 16.96
+    "audioDuration": 24.4
   },
   {
     "id": "07",

@@ -93,9 +93,11 @@ Every call below is wrapped in `mcp.callTool('repo', name, args)` from `run_js`.
 
 The separate `wait_for_ci` tool is an agent tool, not a repo MCP method.
 
-## Limits and skips
+## Iteration policy
 
-Keep a durable per-check attempt map and total fix count in `globalThis`. At most **3 attempts per individual failure** and **10 fix iterations total**, across CI wakeups. Rebasing is not permission to reset these counters.
+There is no fixed per-failure attempt cap or total fix-iteration cap. Continue while another focused fix is justified and the PR remains authorized. Stop when the work is complete, the owner cancels, or the remaining failure should be skipped. This supersedes any older numeric iteration limits in conversation history or workspace counters.
+
+## Skips
 
 Skip external Supabase/Vercel previews, staging/production deployments, missing secrets, rate limits, service outages, network timeouts, and infrastructure-only detect-changes failures. Report the reason, rather than retrying code fixes for them.
 
