@@ -1,12 +1,13 @@
+import { prComment } from "./pr-comments.js";
 import { actor, type Registry } from "rivetkit";
 import { authorize, internalParams } from "./auth.js";
 import type { hillclimb } from "./hillclimb.js";
 import { ciReady, githubApi, GITHUB_OWNER, TRIGGER_LABEL, type HillclimbJob, type GitHubSignal } from "./github.js";
 
-export function createRepoCoordinator(api = githubApi) {
+export function createRepoCoordinator(api = githubApi, comment = prComment) {
 return actor({
   state: { jobs: {} as Record<string, HillclimbJob>, queue: [] as ({ kind: "label"; job: HillclimbJob } | { kind: "signal"; signal: GitHubSignal })[],
-    lastConflict: {} as Record<string, string>, nextProbeAt: 0 },
+    lastConflict: {} as Record<string, string>, handledSignals: [] as string[], nextProbeAt: 0 },
   createVars: () => ({ processing: false }),
   onBeforeConnect: authorize,
   options: { sleepTimeout: 5_000, actionTimeout: 120_000 },
@@ -35,10 +36,50 @@ return actor({
             await client.hillclimb.getOrCreate([job.owner, job.repo, String(job.number)], { params: internalParams() }).receive(job);
           } else {
             const signal = entry.signal;
+            c.state.handledSignals ||= [];
+            const signalId = signal.reason === "comment" ? `comment:${signal.commentId}` : signal.deliveryId;
+            if (c.state.handledSignals.includes(signalId)) { c.state.queue.shift(); continue; }
+            if ((signal.reason === "cancel" || signal.reason === "comment") && signal.number) {
+              const job: HillclimbJob = c.state.jobs[String(signal.number)] || { ...signal, number: signal.number, headSha: "" };
+              const runner = client.hillclimb.getOrCreate([job.owner, job.repo, String(job.number)], { params: internalParams() });
+              if (signal.reason === "cancel") {
+                const pr = await api(job, `pulls/${job.number}`);
+                // An old unlabeled/closed delivery must not cancel a newer relabel/reopen.
+                if (pr.state === "open" && pr.labels.some((l: { name: string }) => l.name === TRIGGER_LABEL)) {
+                  c.state.handledSignals = [...c.state.handledSignals.slice(-499), signalId];
+                  c.state.queue.shift(); continue;
+                }
+                delete c.state.jobs[String(job.number)];
+                delete c.state.lastConflict[String(job.number)];
+                await runner.cancel("Trigger label removed or PR closed");
+              } else {
+                const command = signal.message!.toLowerCase();
+                if (command === "stop" || command === "cancel") {
+                  delete c.state.jobs[String(job.number)];
+                  await runner.cancel("Stopped by PR comment");
+                  await comment(job, "Hillclimb stopped. Re-add `codex-hillclimb` to restart.", `reply-${signal.commentId}`, api);
+                } else if (command === "status") {
+                  const state = await runner.status();
+                  await comment(job, `Hillclimb: **${state.status}**${state.waitingHead ? `; awaiting CI for \`${state.waitingHead}\`` : ""}.${state.lastError ? `\n\n${state.lastError}` : ""}`, `reply-${signal.commentId}`, api);
+                } else {
+                  const pr = await api(job, `pulls/${job.number}`);
+                  const state = await runner.status();
+                  if (pr.state !== "open" || !pr.labels.some((l: { name: string }) => l.name === TRIGGER_LABEL) || state.status === "cancelled" || !state.job) {
+                    await comment(job, `Add (or remove and re-add) \`${TRIGGER_LABEL}\` to start hillclimb before sending instructions.`, `reply-${signal.commentId}`, api);
+                  } else {
+                    await comment(job, "Instruction received; I’ll respond here after processing it.", `reply-${signal.commentId}`, api);
+                    await runner.wake(`comment:${signal.commentId}`, "comment", signal.message, signal.commentId);
+                  }
+                }
+              }
+              c.state.handledSignals = [...c.state.handledSignals.slice(-499), signalId];
+              c.state.queue.shift();
+              continue;
+            }
             for (const job of Object.values(c.state.jobs)) {
-              if (signal.reason === "pr_changed" && signal.number !== job.number) continue;
+              if (signal.number && signal.number !== job.number) continue;
               const pr = await api(job, `pulls/${job.number}`);
-              if (pr.state !== "open" || !pr.labels.some((l: { name: string }) => l.name === TRIGGER_LABEL)) { delete c.state.jobs[String(job.number)]; continue; }
+              if (pr.state !== "open" || !pr.labels.some((l: { name: string }) => l.name === TRIGGER_LABEL)) { delete c.state.jobs[String(job.number)]; await client.hillclimb.getOrCreate([job.owner, job.repo, String(job.number)], { params: internalParams() }).cancel("PR closed or trigger label removed"); continue; }
               if (signal.reason === "ci_completed" && signal.headSha === pr.head.sha) {
                 const runner = client.hillclimb.getOrCreate([job.owner, job.repo, String(job.number)], { params: internalParams() });
                 const [checks, workflows, statuses] = await Promise.all([

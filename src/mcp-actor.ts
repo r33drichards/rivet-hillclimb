@@ -11,8 +11,8 @@ export const mcpJs = actor({
     await db.execute("CREATE TABLE IF NOT EXISTS checkpoint_chunk (generation TEXT NOT NULL, part INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (generation, part))");
     await db.execute("CREATE TABLE IF NOT EXISTS receipt (id TEXT PRIMARY KEY, result TEXT NOT NULL)");
   } }),
-  state: { repository: null as HillclimbJob | null },
-  createVars: () => ({ busy: false }),
+  state: { repository: null as HillclimbJob | null, cancelled: false },
+  createVars: () => ({ busy: false, controller: undefined as AbortController | undefined }),
   onBeforeConnect: authorize,
   options: { actionTimeout: 240_000, sleepTimeout: 5_000 },
   actions: {
@@ -21,11 +21,15 @@ export const mcpJs = actor({
       if (c.vars.busy) throw new UserError("A tool is running.");
       if (c.state.repository && (c.state.repository.repo !== job.repo || c.state.repository.number !== job.number)) throw new UserError("Cannot replace an existing session's repository.");
       c.state.repository = job;
+      c.state.cancelled = false;
     },
+    cancel: (c) => { c.state.cancelled = true; c.vars.controller?.abort(); },
     callTool: async (c, name: string, args: Record<string, unknown>, requestId?: string) => {
+      if (c.state.cancelled) throw new UserError("Hillclimb workspace was cancelled.");
       if (c.vars.busy) throw new UserError("A tool call is already running for this session.");
       if (!["run_js", "__list_tools"].includes(name)) throw new UserError("Unsupported tool.");
       c.vars.busy = true;
+      c.vars.controller = new AbortController();
       try {
         return await c.keepAwake((async () => {
           // Receipts make the agent's interrupted tool calls safe to retry.
@@ -38,7 +42,8 @@ export const mcpJs = actor({
             ? await c.db.execute("SELECT data FROM checkpoint_chunk WHERE generation = ? ORDER BY part", heads[0].generation) as { data: string }[]
             : await c.db.execute("SELECT data FROM checkpoint ORDER BY part") as { data: string }[];
           const snapshot = rows.length ? Buffer.from(rows.map(r => r.data).join(""), "base64") : undefined;
-          const { result, checkpoint } = await invokeRuntime(snapshot, name, args, c.state.repository ? { repository: { job: c.state.repository, token: await githubToken(c.state.repository) } } : undefined);
+          const { result, checkpoint } = await invokeRuntime(snapshot, name, args, { signal: c.vars.controller!.signal, ...(c.state.repository ? { repository: { job: c.state.repository, token: await githubToken(c.state.repository) } } : {}) });
+          if (c.state.cancelled) throw new UserError("Hillclimb workspace was cancelled.");
           const encoded = checkpoint.toString("base64");
           const generation = crypto.randomUUID();
           // Write a new immutable generation in small transactions. Only the
@@ -58,7 +63,7 @@ export const mcpJs = actor({
           }
           return result;
         })());
-      } finally { c.vars.busy = false; }
+      } finally { c.vars.busy = false; c.vars.controller = undefined; }
     },
     status: async (c) => ({ checkpointParts: (await c.db.execute("SELECT part FROM checkpoint_chunk WHERE generation = (SELECT generation FROM checkpoint_head WHERE id = 1)")).length }),
   },

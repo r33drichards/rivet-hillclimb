@@ -40,12 +40,23 @@ export async function githubApi(job: HillclimbJob, path: string, init: RequestIn
   return response.json();
 }
 
-export type WakeReason = "ci_completed" | "conflicts";
-export interface GitHubSignal { owner: string; repo: string; deliveryId: string; installationId: number; reason: "ci_completed" | "pr_changed"; headSha?: string; number?: number; }
+export type WakeReason = "ci_completed" | "conflicts" | "comment";
+export interface GitHubSignal { owner: string; repo: string; deliveryId: string; installationId: number; reason: "ci_completed" | "pr_changed" | "cancel" | "comment"; headSha?: string; number?: number; message?: string; commentId?: number; }
 export function githubSignal(event: string, p: any, deliveryId: string): GitHubSignal | undefined {
   if (p?.repository?.owner?.login?.toLowerCase() !== GITHUB_OWNER || !/^[A-Za-z0-9_.-]+$/.test(p.repository?.name || "") || !Number.isInteger(p.installation?.id) || !deliveryId) return;
   const common = { owner: GITHUB_OWNER, repo: p.repository.name, deliveryId, installationId: p.installation.id };
   if (event === "push") return; // Our own pushes never wake the runner.
+  if (event === "pull_request" && Number.isInteger(p.pull_request?.number) &&
+      (p.action === "closed" || (p.action === "unlabeled" && p.label?.name === TRIGGER_LABEL))) {
+    return { ...common, reason: "cancel", number: p.pull_request.number };
+  }
+  if (event === "issue_comment" && p.action === "created" && p.issue?.pull_request &&
+      p.comment?.user?.login?.toLowerCase() === GITHUB_OWNER && p.sender?.login?.toLowerCase() === GITHUB_OWNER &&
+      p.comment.user.type !== "Bot" && Number.isInteger(p.issue.number) && Number.isInteger(p.comment.id)) {
+    const match = /^\s*(?:\/hillclimb|@r33drichards-codex-hillclimb)\b[ :]*([\s\S]*)$/i.exec(p.comment.body || "");
+    if (match && match[1].trim()) return { ...common, reason: "comment", number: p.issue.number,
+      message: match[1].trim().slice(0, 12000), commentId: p.comment.id };
+  }
   const completed = event === "workflow_run" ? p.action === "completed" : ["check_suite", "check_run"].includes(event) ? p.action === "completed" : event === "status" && ["success", "failure", "error"].includes(p.state);
   if (completed) {
     const headSha = p.workflow_run?.head_sha || p.check_suite?.head_sha || p.check_run?.head_sha || p.sha;

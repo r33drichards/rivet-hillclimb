@@ -1,3 +1,4 @@
+import { prComment } from "./pr-comments.js";
 import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -74,6 +75,7 @@ async function invoke(name: string, a: any): Promise<unknown> {
       } catch (error) { return { conflicts: await git(root, ["diff", "--name-only", "--diff-filter=U"], token), error: String(error), base: pr.base.ref }; }
     }
     case "continue_rebase": {
+      await activePr();
       for (const path of a.paths) await repositoryPath(root, path);
       await git(root, ["add", "--", ...a.paths], token);
       // Suppress any interactive editor; commit messages are already present.
@@ -95,11 +97,8 @@ async function invoke(name: string, a: any): Promise<unknown> {
       return { head, branch: pr.head.ref };
     }
     case "comment": {
-      const marker = "<!-- codex-hillclimb -->";
-      const comments = await api(`issues/${job.number}/comments?per_page=100`);
-      const previous = comments.find((c: any) => c.body?.startsWith(marker) && c.user?.type === "Bot");
-      const body = JSON.stringify({ body: `${marker}\n${a.body}` });
-      return previous ? api(`issues/comments/${previous.id}`, { method: "PATCH", body }) : api(`issues/${job.number}/comments`, { method: "POST", body });
+      await activePr();
+      return prComment(job, a.body, "status", (_job, path, init) => api(path, init));
     }
     default: throw new Error("Unsupported repository tool");
   }

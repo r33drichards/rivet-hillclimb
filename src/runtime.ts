@@ -15,7 +15,7 @@ export const MAX_ARCHIVE_BYTES = 32 * 1024 * 1024;
 
 // Each invocation starts from the last committed checkpoint. No worker-local
 // path is authoritative, and a failed call cannot corrupt the saved session.
-export async function invokeRuntime(snapshot: Uint8Array | undefined, name: string, args: Record<string, unknown>, options?: { repository: { job: HillclimbJob; token: string } }) {
+export async function invokeRuntime(snapshot: Uint8Array | undefined, name: string, args: Record<string, unknown>, options?: { signal?: AbortSignal; repository?: { job: HillclimbJob; token: string } }) {
   const directory = await mkdtemp(join(tmpdir(), "rivet-mcp-"));
   const archive = join(directory, "checkpoint.tgz");
   const data = join(directory, "data");
@@ -23,7 +23,10 @@ export async function invokeRuntime(snapshot: Uint8Array | undefined, name: stri
   let workspacePrelude = "";
   let transport: StdioClientTransport | undefined;
   const client = new Client({ name: "rivet-mcp-js", version: "1.0.0" });
+  const abort = () => { void transport?.close().catch(() => undefined); };
+  options?.signal?.addEventListener("abort", abort, { once: true });
   try {
+    options?.signal?.throwIfAborted();
     if (snapshot) {
       await writeFile(archive, snapshot);
       await exec("tar", ["-xzf", archive, "-C", directory]);
@@ -88,6 +91,7 @@ async function pre(input) {
     let stderr = "";
     transport.stderr?.on("data", (chunk) => { stderr = (stderr + chunk).slice(-4000); });
     try {
+      options?.signal?.throwIfAborted();
       await client.connect(transport, { timeout: 30_000 });
       let result: unknown;
       if (name === "__list_tools") result = await client.listTools();
@@ -102,6 +106,7 @@ async function pre(input) {
         const deadline = Date.now() + (executionTimeout + 15) * 1000;
         let execution: Record<string, unknown>;
         do {
+          options?.signal?.throwIfAborted();
           if (Date.now() > deadline) throw new Error("JavaScript execution timed out");
           await delay(25);
           execution = unpack(await client.callTool({ name: "get_execution", arguments: { execution_id } }));
@@ -122,6 +127,7 @@ async function pre(input) {
       throw new Error(`${error instanceof Error ? error.message : error}${stderr ? `\n${stderr}` : ""}`);
     }
   } finally {
+    options?.signal?.removeEventListener("abort", abort);
     if (transport) await transport.close().catch(() => undefined);
     if (moduleServer) await new Promise<void>(resolve => moduleServer!.close(() => resolve()));
     await rm(directory, { recursive: true, force: true });

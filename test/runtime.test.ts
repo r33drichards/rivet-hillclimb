@@ -15,3 +15,10 @@ test("host capabilities remain unavailable", async () => {
   const call = await invokeRuntime(undefined, "run_js", { code: "await fetch('https://example.com')" });
   assert.match(JSON.stringify(call.result), /failed|denied|not defined/i);
 });
+
+test("cancellation interrupts running JavaScript without saving a checkpoint", async () => {
+  const controller = new AbortController();
+  const running = invokeRuntime(undefined, "run_js", { code: "while(true){}" }, { signal: controller.signal });
+  setTimeout(() => controller.abort(), 500);
+  await assert.rejects(running);
+});

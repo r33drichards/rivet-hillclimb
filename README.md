@@ -10,7 +10,20 @@ The local implementation passes TypeScript checks, HMAC/webhook tests, wake-deci
 
 **Cloud deployment succeeds through GitHub Actions.** The first Actions run built, pushed, and deployed in about five minutes. The app health endpoint returns 200 at https://durablejs-wwiv-durablejs-wwiv-d-6yr5.rivet.run/api/rivet/health. The CLI still receives the exact requested `--namespace durablejs-wwiv-durablejs-wwiv-d-8xoj`; Rivet resolved that display name to namespace ID `durablejs-wwiv-d-6yr5`, whose engine namespace/hostname is `durablejs-wwiv-durablejs-wwiv-d-6yr5`. The originally supplied hostname ending in `8xoj` returns 404. PRs run tests; pushes to `main` test, build, push, deploy, and verify health. Credentials live in Actions secrets, not source. RivetKit is pinned to 2.3.31 for serverless support.
 
-The private GitHub App is installed on all current and future r33drichards repositories (App ID 5725876, installation 181185920), and its signing key is configured locally. Its signed webhook is active at `https://durablejs-wwiv-durablejs-wwiv-d-6yr5.rivet.run/github/webhook`; GitHub installation deliveries return 202. Subscriptions are `pull_request`, `check_run`, `check_suite`, `status`, and `workflow_run`; `push` is excluded. ChatGPT sign-in completed with the Apple-linked account, renewable OAuth credentials are saved in the deployed cloud credentials actor, and a model call through the public cloud endpoint returned `connected`. A full labeled PR repair/CI/resume cycle remains to be verified.
+The private GitHub App is installed on all current and future r33drichards repositories (App ID 5725876, installation 181185920), and its signing key is configured locally. Its signed webhook is active at `https://durablejs-wwiv-durablejs-wwiv-d-6yr5.rivet.run/github/webhook`; GitHub installation deliveries return 202. Subscriptions are `pull_request`, `check_run`, `check_suite`, `status`, `workflow_run`, and `issue_comment`; `push` is excluded. ChatGPT sign-in completed with the Apple-linked account, renewable OAuth credentials are saved in the deployed cloud credentials actor, and a model call through the public cloud endpoint returned `connected`. A full labeled PR repair/CI/resume cycle remains to be verified.
+
+## PR controls
+
+Apply `codex-hillclimb` as r33drichards to start. Removing it or closing the PR cancels the agent, aborts active inference/workspace execution, clears queued wakeups, and stops conflict probes. Re-add the label to restart. Already-pushed commits and GitHub Actions jobs remain.
+
+The app maintains a status comment for running, waiting for CI, finished, error, and cancelled states. As r33drichards, post a new top-level PR comment:
+
+- `/hillclimb status` — get the current state without model inference.
+- `/hillclimb stop` — cancel the agent without removing the label.
+- `/hillclimb <instruction or question>` — queue a message for the next turn and receive a PR reply. The label must be present and the runner must not be cancelled.
+- `@r33drichards-codex-hillclimb <message>` — equivalent to `/hillclimb <message>`.
+
+Only new owner comments are commands; edited comments, bot comments, other users, ordinary discussion, and non-PR issues are ignored. Comment commands intentionally wake the runner, including while CI is pending. Pushes still never wake it. The webhook also subscribes to `issue_comment`.
 
 ## Sleep and wake behavior
 
