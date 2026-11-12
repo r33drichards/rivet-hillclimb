@@ -35,13 +35,21 @@ export const agent = pi({
     .credentials.getOrCreate([c.key[0]], { params: internalParams() }),
 });
 export const registry = setup({ use: { mcpJs, credentials, chatgptLogin, agent, hillclimb, hillclimbRepo } });
-registry.start();
-
-if (process.env.GITHUB_WEBHOOK_PORT) {
+if (process.env.GITHUB_WEBHOOK_SECRET) {
   const client = createClient<typeof registry>();
   const app = githubWebhook((input) => {
     const target = input.kind === "label" ? input.job : input.signal;
     return client.hillclimbRepo.getOrCreate([target.owner, target.repo], { params: internalParams() }).receive(input);
   });
-  serve({ fetch: app.fetch, port: Number(process.env.GITHUB_WEBHOOK_PORT), hostname: "0.0.0.0" });
-}
+  if (process.env.RIVETKIT_RUNTIME_MODE === "serverless") {
+    // Use the same native listener as start(), adding the webhook fallback.
+    // Rivet continues to own /api/rivet and its actor lifecycle endpoints.
+    void registry.listen({ application: app }).catch((error) => {
+      console.error("Rivet HTTP listener failed", error);
+      process.exit(1);
+    });
+  } else {
+    registry.start();
+    serve({ fetch: app.fetch, port: Number(process.env.GITHUB_WEBHOOK_PORT || 8080), hostname: "0.0.0.0" });
+  }
+} else registry.start();
