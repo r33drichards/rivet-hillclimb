@@ -122,3 +122,26 @@ References: [Rivet GitHub connector](https://rivet.dev/guides/connect-github/), 
 [Video sources and render instructions](video/README.md) include an eight-scene Manim explainer with ElevenLabs narration. Run `npm run video:narrate` with the locally onboarded `.env.local`, then render `video/hillclimb.py`. Generated audio/video and the API key are ignored by Git.
 
 Long agent turns use a short durable submission request and reconcile its saved result; they do not keep a model HTTP request open for minutes. Transport retries recover the same submission rather than creating another model turn.
+
+## Native Pi hooks → PR progress comments
+
+Configure events in [`src/hooks/config.ts`](src/hooks/config.ts). Attach the reusable [`forwardComment`](src/hooks/forward-comment.ts) to native Pi hooks:
+
+```ts
+hook(ToolTask, {
+  beforeTool: forwardComment("beforeTool"),
+  afterTool: forwardComment("afterTool", {
+    mode: "update", // one rolling progress comment; use "append" for separate comments
+    format: ({ toolName, outcome }) =>
+      `\`${toolName}\`: ${outcome === "error" ? "reported an error" : "returned"}.`,
+  }),
+});
+```
+
+The default configuration enables `beforeTool`, `afterTool`, and `onYield`. The same forwarder supports `beforeRequest`, `afterResponse`, `afterTools`, `afterRun`, and `beforeCompact`. Remove a registration to disable it. A formatter can return `undefined` to skip an event, for example `format: e => e.outcome === "error" ? "Tool reported an error." : undefined`.
+
+Formatters receive normalized metadata: event, task/conversation IDs, tool name, outcome, and relevant counts. Raw prompts, JavaScript, reasoning, results, and provider payloads are not included. Native hooks see the outer `run_js` invocation; repository MCP operations executed inside mcp-js are not separate Pi hook events.
+
+Forwarding enqueues a durable event without waiting for GitHub. Update-mode events coalesce for five seconds into one `Hillclimb progress` comment; append-mode events get distinct, stable comment markers. Queued GitHub deliveries retry after failures. Cancellation clears/suppresses progress delivery. Progress forwarding is observational: an unavailable GitHub service never blocks a tool or changes an agent result. A failed initial enqueue is logged and skipped; this is feedback, not an audit log.
+
+This configuration is trusted code in the deployed controller repository. Cloned PR repositories do not automatically load their own hook files.

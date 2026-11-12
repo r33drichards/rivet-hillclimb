@@ -1,3 +1,7 @@
+import { enqueueProgress, deliverProgress } from "./progress-comments.js";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { ForwardCommentContext, type ProgressComment } from "./hooks/forward-comment.js";
+import { progressCommentExtension } from "./hooks/config.js";
 import { readTurnResult, isTransportFailure } from "./turn-submission.js";
 import type { SubmissionId } from "@earendil-works/pi-durable";
 import { prComment } from "./pr-comments.js";
@@ -17,6 +21,7 @@ function actorId(envId: string) {
   return envId.slice("pi-files:".length);
 }
 const tools = createRegistry();
+tools.install(progressCommentExtension);
 tools.install(defineExtension({ name: "hillclimb-code-mode", sections: [section("environment", () => "Use run_js in the PR's mcp-js actor. globalThis.git is the installed isomorphic-git; fs operates inside REPO_DIR. Backend GitHub tools are at mcp.callTool('repo',name,args). When CI is pending, call wait_for_ci then end the turn; do not poll or sleep in code.")], tools: [defineTool({
   name: "run_js", description: "Execute JavaScript in the PR workspace using fs, REPO_DIR, installed isomorphic-git as git, and the repo MCP backend for GitHub Actions and pushes.",
   parameters: obj({ code: str() }), replay: "unsafe", executionMode: "sequential",
@@ -42,12 +47,14 @@ export const hillclimb = pi({
   credentials: (c) => c.client<Registry<{ credentials: typeof credentials }>>()
     .credentials.getOrCreate([process.env.HILLCLIMB_USER_ID || "owner"], { params: internalParams() }),
   state: { job: null as HillclimbJob | null, status: "idle", finished: [] as string[], lastError: null as string | null,
-    waitingHead: null as string | null, pending: [] as { id: string; reason: string; message?: string; commentId?: number }[], reason: "label", message: null as string | null, commentId: null as number | null, activeSubmission: null as SubmissionId | null, transportFailures: 0 },
-  createVars: () => ({ running: false, settling: false }),
+    waitingHead: null as string | null, pending: [] as { id: string; reason: string; message?: string; commentId?: number }[], reason: "label", message: null as string | null, commentId: null as number | null, activeSubmission: null as SubmissionId | null, transportFailures: 0, progressQueue: [] as ProgressComment[], progressSeen: [] as string[] },
+  createVars: () => ({ running: false, settling: false, flushingProgress: false }),
   onBeforeConnect: authorize,
   options: { actionTimeout: 30 * 60_000, sleepTimeout: 5_000 },
   onWake: async (c) => {
     if (c.state.status === "cancelled") return;
+    if (c.state.job) await c.pi.commit(async tx => { (await tx.doc(ForwardCommentContext)).actorId = c.actorId; }, BACKGROUND_CONTEXT);
+    if (c.state.progressQueue?.length) await c.schedule.after(0, "flushProgress");
     if (c.state.activeSubmission) await c.schedule.after(0, "settleJob", c.state.job!.deliveryId);
     else if (c.state.job && (["queued", "running"].includes(c.state.status) || (c.state.status === "error" && isTransportFailure(c.state.lastError)))) await c.schedule.after(0, "runJob", c.state.job.deliveryId);
   },
@@ -56,6 +63,26 @@ export const hillclimb = pi({
     if (c.state.activeSubmission && c.state.status !== "cancelled") await c.schedule.after(0, "settleJob", c.state.job!.deliveryId);
   },
   actions: {
+    forwardProgress: async (c, event: ProgressComment) => {
+      if (!c.state.job || c.state.status === "cancelled") return;
+      if (!enqueueProgress(c.state, event)) return;
+      await c.schedule.after(5000, "flushProgress");
+    },
+    flushProgress: async (c): Promise<void> => {
+      if (c.vars.flushingProgress || !c.state.progressQueue?.length) return;
+      if (!c.state.job || c.state.status === "cancelled") { c.state.progressQueue = []; return; }
+      c.vars.flushingProgress = true;
+      let retry = false;
+      try {
+        await deliverProgress(c.state, c.state.job);
+      } catch {
+        retry = true;
+        c.log.warn({ message: "PR progress delivery failed; retrying" });
+      } finally {
+        c.vars.flushingProgress = false;
+        if (c.state.progressQueue.length && c.state.status !== "cancelled") await c.schedule.after(retry ? 30_000 : 1000, "flushProgress");
+      }
+    },
     receive: async (c, job: HillclimbJob) => {
       if (job.owner !== GITHUB_OWNER || c.key.join("/") !== `${job.owner}/${job.repo}/${job.number}`) throw new UserError("Job does not match this PR actor.");
       if (c.state.activeSubmission) { await c.schedule.after(0, "settleJob", c.state.job!.deliveryId); return { busy: true }; }
@@ -68,6 +95,7 @@ export const hillclimb = pi({
       c.state.message = null;
       c.state.commentId = null;
       c.state.pending = [];
+      c.state.progressQueue = [];
       c.state.activeSubmission = null;
       c.state.transportFailures = 0;
       c.state.waitingHead = null;
@@ -79,6 +107,7 @@ export const hillclimb = pi({
       const job = c.state.job;
       if (!job) return;
       c.state.status = "cancelled";
+      c.state.progressQueue = [];
       c.state.activeSubmission = null;
       c.state.waitingHead = null;
       c.state.pending = [];
@@ -124,6 +153,7 @@ export const hillclimb = pi({
       if (!job || job.deliveryId !== deliveryId) return;
       c.vars.running = true;
       try {
+        await c.pi.commit(async tx => { (await tx.doc(ForwardCommentContext)).actorId = c.actorId; }, BACKGROUND_CONTEXT);
         const pr = await githubApi(job, `pulls/${job.number}`);
         if (pr.state !== "open" || !pr.labels.some((l: { name: string }) => l.name === TRIGGER_LABEL)) {
           c.state.status = "cancelled";
