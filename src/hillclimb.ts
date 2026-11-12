@@ -66,7 +66,7 @@ export const hillclimb = pi({
     },
     cancel: async (c, reason: string) => {
       const job = c.state.job;
-      if (!job || c.state.status === "cancelled") return;
+      if (!job) return;
       c.state.status = "cancelled";
       c.state.waitingHead = null;
       c.state.pending = [];
