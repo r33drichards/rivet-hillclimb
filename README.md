@@ -2,8 +2,7 @@
 
 A `codex-hillclimb` label applied by **r33drichards** starts a CI repair agent for a PR in any repository owned by **r33drichards**. Each PR has a durable agent actor and an mcp-js actor containing its cloned Git repository. The agent runs an OpenAI model through Rivet Pi, edits code using JavaScript, `fs`, and installed `isomorphic-git`, pushes focused fixes, and uses GitHub Actions as its test feedback.
 
-The agent's instructions live directly in [prompts/hillclimb.md](prompts/hillclimb.md). They were adapted from the local cloud project's hillclimb workflow. No skill loader or separate skill installation is used.
-
+The agent's instructions live directly in [prompts/hillclimb.md](prompts/hillclimb.md). 
 ## Current status
 
 The local implementation passes TypeScript checks, HMAC/webhook tests, wake-decision tests, repository edit/restart tests, and an isomorphic-git merge-conflict test. The original actor persistence, idle sleep/wake, retry receipt, and stdio MCP bridge checks were also verified locally.
