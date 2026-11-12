@@ -1,0 +1,36 @@
+{
+  "name": "rivet",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "tsx --test test/*.test.ts",
+    "start": "tsx src/server.ts",
+    "check": "tsc --noEmit",
+    "dev": "node --env-file=.env --import tsx src/server.ts",
+    "client": "node --env-file=.env --import tsx src/client.ts",
+    "deploy": "node scripts/deploy.mjs",
+    "test:actor": "node --env-file=.env --import tsx test/actor-smoke.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-ai": "^1.5.2",
+    "@earendil-works/pi-coding-agent": "^1.5.2",
+    "@earendil-works/pi-durable": "^1.5.2",
+    "@earendil-works/pi-schema": "^1.5.2",
+    "@hono/node-server": "^2.1.7",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@octokit/auth-app": "^8.3.1",
+    "@rivet-dev/pi": "^0.5.6",
+    "hono": "^4.13.18",
+    "rivetkit": "2.3.31"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

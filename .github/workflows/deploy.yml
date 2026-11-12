@@ -1,0 +1,54 @@
+name: Test and deploy
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Install mcp-js runtime
+        run: |
+          curl -fsSL --retry 3 https://github.com/r33drichards/mcp-js/releases/download/v0.22.0/mcp-v8-linux.gz | gzip -d > "$RUNNER_TEMP/mcp-v8"
+          chmod +x "$RUNNER_TEMP/mcp-v8"
+          echo "MCP_V8_BINARY=$RUNNER_TEMP/mcp-v8" >> "$GITHUB_ENV"
+      - run: npm run check
+      - run: npm test
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: docker/setup-buildx-action@v3
+      - run: npm ci
+      - name: Build, push, and deploy to Rivet
+        run: npm run deploy
+        env:
+          RIVET_CLOUD_TOKEN: ${{ secrets.RIVET_CLOUD_TOKEN }}
+          APP_ACCESS_TOKEN: ${{ secrets.APP_ACCESS_TOKEN }}
+          CHATGPT_HOST_ID: ${{ secrets.CHATGPT_HOST_ID }}
+          CHATGPT_CLIENT_ID: ${{ secrets.CHATGPT_CLIENT_ID }}
+          GITHUB_APP_ID: ${{ secrets.HILLCLIMB_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.HILLCLIMB_APP_PRIVATE_KEY }}
+          GITHUB_WEBHOOK_SECRET: ${{ secrets.HILLCLIMB_WEBHOOK_SECRET }}
+      - name: Verify deployment health
+        run: curl --fail --retry 10 --retry-all-errors --retry-delay 5 https://durablejs-wwiv-durablejs-wwiv-d-8xoj.rivet.run/api/rivet/health

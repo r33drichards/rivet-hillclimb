@@ -1,0 +1,7 @@
+node_modules
+.local
+.env
+.git
+mcp-js
+rivet-agents
+test
