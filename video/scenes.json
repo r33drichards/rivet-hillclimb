@@ -1,0 +1,66 @@
+[
+  {
+    "id": "01",
+    "title": "A controlled feedback loop",
+    "text": "A coding agent becomes useful when it closes a feedback loop: inspect a failure, make a focused change, and check the result. Here, each step up the hill must earn its evidence.",
+    "duration": 14,
+    "audio": "audio/01.mp3",
+    "audioDuration": 12.4
+  },
+  {
+    "id": "02",
+    "title": "One label starts the loop",
+    "text": "The starting signal is a label: codex hillclimb. When the repository owner applies it to an open pull request, a coordinator schedules a runner. The automation currently accepts only repositories and commands from R thirty three D Richards.",
+    "duration": 19,
+    "audio": "audio/02.mp3",
+    "audioDuration": 16.8
+  },
+  {
+    "id": "03",
+    "title": "Two actors, durable state",
+    "text": "Each pull request has two durable actors. The runner holds the conversation. Its M C P JavaScript workspace holds a real repository clone. JavaScript, file access, and isomorphic git let the agent inspect and edit that clone.",
+    "duration": 19,
+    "audio": "audio/03.mp3",
+    "audioDuration": 17.44
+  },
+  {
+    "id": "04",
+    "title": "Evidence comes from CI",
+    "text": "But the workspace does not run builds or tests. The agent pushes its change, then GitHub Actions supplies the feedback. Each result belongs to a particular commit, identified by its head S H A.",
+    "duration": 17,
+    "audio": "audio/04.mp3",
+    "audioDuration": 14.56
+  },
+  {
+    "id": "05",
+    "title": "Waiting is a state",
+    "text": "While C I runs, the runner and workspace sleep. Their saved state remains. The coordinator wakes the agent only when all observed checks for the current head are terminal. Old results do not count. A push never wakes the agent by itself.",
+    "duration": 20,
+    "audio": "audio/05.mp3",
+    "audioDuration": 17.6
+  },
+  {
+    "id": "06",
+    "title": "Conflicts and finite limits",
+    "text": "A confirmed merge conflict can also wake the runner to resolve it. Work stays bounded: three attempts per failure, ten fix iterations overall. Infrastructure and missing secret failures are reported rather than disguised as code fixes.",
+    "duration": 19,
+    "audio": "audio/06.mp3",
+    "audioDuration": 16.96
+  },
+  {
+    "id": "07",
+    "title": "The PR is the control surface",
+    "text": "The pull request is also the control surface. The agent updates a status comment. The owner can ask for status, send an instruction, or ask a question using slash hillclimb. Instructions queue behind the current turn.",
+    "duration": 18,
+    "audio": "audio/07.mp3",
+    "audioDuration": 15.52
+  },
+  {
+    "id": "08",
+    "title": "A visible stop switch",
+    "text": "Remove the label, close the pull request, or send slash hillclimb stop, and the agent cancels active work and clears pending wakeups. Already pushed commits and started Actions jobs remain. Re-add the label to restart the loop.",
+    "duration": 18,
+    "audio": "audio/08.mp3",
+    "audioDuration": 16.32
+  }
+]

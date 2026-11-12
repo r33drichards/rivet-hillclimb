@@ -117,3 +117,9 @@ Repository-mode calls have a 120-second execution limit, 256 MiB V8 heap, 64 KB 
 No Cargo commands were run. For Rust source changes in `mcp-js/`, use its Nix flake (`nix develop --command cargo ...`).
 
 References: [Rivet GitHub connector](https://rivet.dev/guides/connect-github/), [sandbox code mode](https://rivet.dev/guides/sandbox-code-mode/), [ChatGPT sign-in](https://rivet.dev/guides/sign-in-with-chatgpt/), [GitHub webhook events](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
+
+## Narrated explainer
+
+[Video sources and render instructions](video/README.md) include an eight-scene Manim explainer with ElevenLabs narration. Run `npm run video:narrate` with the locally onboarded `.env.local`, then render `video/hillclimb.py`. Generated audio/video and the API key are ignored by Git.
+
+Long agent turns use a short durable submission request and reconcile its saved result; they do not keep a model HTTP request open for minutes. Transport retries recover the same submission rather than creating another model turn.

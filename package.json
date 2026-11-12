@@ -10,7 +10,8 @@
     "dev": "node --env-file=.env --import tsx src/server.ts",
     "client": "node --env-file=.env --import tsx src/client.ts",
     "deploy": "node scripts/deploy.mjs",
-    "test:actor": "node --env-file=.env --import tsx test/actor-smoke.ts"
+    "test:actor": "node --env-file=.env --import tsx test/actor-smoke.ts",
+    "video:narrate": "node --env-file=.env.local scripts/narrate-video.mjs"
   },
   "keywords": [],
   "author": "",
@@ -21,6 +22,7 @@
     "@earendil-works/pi-coding-agent": "^1.5.2",
     "@earendil-works/pi-durable": "^1.5.2",
     "@earendil-works/pi-schema": "^1.5.2",
+    "@elevenlabs/elevenlabs-js": "^2.78.0",
     "@hono/node-server": "^2.1.7",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@octokit/auth-app": "^8.3.1",

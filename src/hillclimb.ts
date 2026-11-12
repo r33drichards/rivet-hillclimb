@@ -1,3 +1,5 @@
+import { readTurnResult, isTransportFailure } from "./turn-submission.js";
+import type { SubmissionId } from "@earendil-works/pi-durable";
 import { prComment } from "./pr-comments.js";
 import { createRegistry, defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { obj, str } from "@earendil-works/pi-schema";
@@ -40,16 +42,23 @@ export const hillclimb = pi({
   credentials: (c) => c.client<Registry<{ credentials: typeof credentials }>>()
     .credentials.getOrCreate([process.env.HILLCLIMB_USER_ID || "owner"], { params: internalParams() }),
   state: { job: null as HillclimbJob | null, status: "idle", finished: [] as string[], lastError: null as string | null,
-    waitingHead: null as string | null, pending: [] as { id: string; reason: string; message?: string; commentId?: number }[], reason: "label", message: null as string | null, commentId: null as number | null },
-  createVars: () => ({ running: false }),
+    waitingHead: null as string | null, pending: [] as { id: string; reason: string; message?: string; commentId?: number }[], reason: "label", message: null as string | null, commentId: null as number | null, activeSubmission: null as SubmissionId | null, transportFailures: 0 },
+  createVars: () => ({ running: false, settling: false }),
   onBeforeConnect: authorize,
   options: { actionTimeout: 30 * 60_000, sleepTimeout: 5_000 },
   onWake: async (c) => {
-    if (c.state.job && ["queued", "running"].includes(c.state.status)) await c.schedule.after(0, "runJob", c.state.job.deliveryId);
+    if (c.state.status === "cancelled") return;
+    if (c.state.activeSubmission) await c.schedule.after(0, "settleJob", c.state.job!.deliveryId);
+    else if (c.state.job && (["queued", "running"].includes(c.state.status) || (c.state.status === "error" && isTransportFailure(c.state.lastError)))) await c.schedule.after(0, "runJob", c.state.job.deliveryId);
+  },
+  onAnswer: async (c) => {
+    // The normal final answer path needs no timer while the runner waits for CI.
+    if (c.state.activeSubmission && c.state.status !== "cancelled") await c.schedule.after(0, "settleJob", c.state.job!.deliveryId);
   },
   actions: {
     receive: async (c, job: HillclimbJob) => {
       if (job.owner !== GITHUB_OWNER || c.key.join("/") !== `${job.owner}/${job.repo}/${job.number}`) throw new UserError("Job does not match this PR actor.");
+      if (c.state.activeSubmission) { await c.schedule.after(0, "settleJob", c.state.job!.deliveryId); return { busy: true }; }
       if (c.vars.running && c.state.status === "cancelled") { await c.schedule.after(1000, "receive", job); return { queued: true }; }
       if (c.state.finished.includes(job.deliveryId)) return { duplicate: true };
       if (["queued", "running"].includes(c.state.status)) return { busy: true };
@@ -59,6 +68,8 @@ export const hillclimb = pi({
       c.state.message = null;
       c.state.commentId = null;
       c.state.pending = [];
+      c.state.activeSubmission = null;
+      c.state.transportFailures = 0;
       c.state.waitingHead = null;
       c.state.lastError = null;
       await c.schedule.after(0, "runJob", job.deliveryId);
@@ -68,6 +79,7 @@ export const hillclimb = pi({
       const job = c.state.job;
       if (!job) return;
       c.state.status = "cancelled";
+      c.state.activeSubmission = null;
       c.state.waitingHead = null;
       c.state.pending = [];
       const self = c.client<Registry<{ hillclimb: typeof hillclimb }>>().hillclimb.getForId(c.actorId, { params: internalParams() });
@@ -78,8 +90,9 @@ export const hillclimb = pi({
     },
     wake: async (c, id: string, reason: WakeReason, message?: string, commentId?: number) => {
       if (!c.state.job || c.state.status === "cancelled" || c.state.finished.includes(id)) return;
-      if (c.vars.running || ["queued", "running"].includes(c.state.status)) {
+      if (c.state.activeSubmission || c.vars.running || ["queued", "running"].includes(c.state.status)) {
         if (!c.state.pending.some(p => p.id === id)) c.state.pending.push({ id, reason, message, commentId });
+        if (c.state.activeSubmission && c.state.status === "error") await c.schedule.after(0, "settleJob", c.state.job.deliveryId);
         return;
       }
       // The coordinator calls this only after confirming CI readiness or conflicts.
@@ -88,6 +101,7 @@ export const hillclimb = pi({
       c.state.message = message || null;
       c.state.commentId = commentId || null;
       c.state.status = "queued";
+      c.state.transportFailures = 0;
       c.state.waitingHead = null;
       await c.schedule.after(0, "runJob", id);
     },
@@ -104,6 +118,7 @@ export const hillclimb = pi({
       });
     },
     runJob: async (c, deliveryId: string): Promise<void> => {
+      c.state.transportFailures ??= 0;
       if (c.vars.running || c.state.status === "cancelled" || c.state.finished.includes(deliveryId)) return;
       const job = c.state.job;
       if (!job || job.deliveryId !== deliveryId) return;
@@ -123,32 +138,49 @@ export const hillclimb = pi({
           return;
         }
         if (pr.head.repo?.full_name?.toLowerCase() !== `${job.owner}/${job.repo}`.toLowerCase()) throw new Error("This installation cannot write to the fork's branch.");
+        const self = c.client<Registry<{ hillclimb: typeof hillclimb }>>().hillclimb.getForId(c.actorId, { params: internalParams() });
+        const existing = (await self.harness.inspect()).submissions.find(s => s.requestId === deliveryId);
+        if (c.state.status === "cancelled") return;
+        if (existing) {
+          c.state.activeSubmission = existing.id;
+          c.state.status = c.state.waitingHead ? "waiting_ci" : "running";
+          c.state.lastError = null;
+          c.state.transportFailures = 0;
+          await prComment(job, "**Hillclimb resumed.** Reattached to the existing model turn after a connection interruption; no duplicate run was started.");
+          await c.schedule.after(0, "settleJob", deliveryId);
+          return;
+        }
         if (c.state.status === "cancelled") return;
         await c.client<Registry<{ mcpJs: typeof mcpJs }>>().mcpJs.getOrCreate(["hillclimb", c.actorId], { params: internalParams() }).configureRepository(job);
         if (c.state.status === "cancelled") return;
         c.state.status = "running";
         await prComment(job, `**Hillclimb running** (${c.state.reason}). I’ll use GitHub Actions for feedback. Remove \`${TRIGGER_LABEL}\` to cancel, or comment \`/hillclimb <message>\`.`);
-        const self = c.client<Registry<{ hillclimb: typeof hillclimb }>>().hillclimb.getForId(c.actorId, { params: internalParams() });
         if (c.state.status === "cancelled") return;
-        const result = await c.keepAwake(self.prompt(hillclimbPrompt(job, c.state.reason) + (c.state.message ? `\n\nOwner instruction from PR comment ${c.state.commentId}:\n${c.state.message}\nRespond to this instruction in your final answer. If it is a question, answer without making unrelated changes.` : ""), { requestId: deliveryId }));
-        if (c.state.status === "cancelled") return;
-        if (result.status !== "done") throw new Error(`Agent did not finish: ${result.reason}`);
-        if (c.state.commentId) await prComment(job, result.text || "Instruction processed.", `reply-${c.state.commentId}`);
-        if (!c.state.waitingHead) {
-          c.state.status = "done";
-          await prComment(job, `**Hillclimb finished this turn.**\n\n${result.text || "No further action reported."}`);
+        const { submissionId } = await self.submit(hillclimbPrompt(job, c.state.reason) + (c.state.message ? `\n\nOwner instruction from PR comment ${c.state.commentId}:\n${c.state.message}\nRespond to this instruction in your final answer. If it is a question, answer without making unrelated changes.` : ""), { requestId: deliveryId, whenBusy: "followUp" });
+        if (c.state.status === "cancelled") {
+          // Cancellation may have reached Pi just before submit was accepted.
+          const root = await self.harness.root();
+          await self.conversation.abort(root.id);
+          return;
         }
-        c.state.finished = [...c.state.finished.slice(-199), deliveryId];
+        c.state.activeSubmission = submissionId;
+        c.state.transportFailures = 0;
+        await c.schedule.after(1000, "settleJob", deliveryId);
       } catch (error) {
         if (c.state.status === "cancelled") return;
         c.state.lastError = error instanceof Error ? error.message : String(error);
+        if (isTransportFailure(error) && ++c.state.transportFailures <= 3) {
+          c.state.status = "queued";
+          await c.schedule.after(10_000 * c.state.transportFailures, "runJob", deliveryId);
+          return;
+        }
         c.state.status = "error";
         c.log.error({ message: "hillclimb failed", error: c.state.lastError });
         await prComment(job, `**Hillclimb error:** ${c.state.lastError}`).catch(() => undefined);
       } finally {
         c.vars.running = false;
-        const next = c.state.pending.shift();
-        if (next && c.state.job && c.state.status !== "cancelled") {
+        const next = !c.state.activeSubmission && c.state.status !== "queued" ? c.state.pending.shift() : undefined;
+        if (next && c.state.job && c.state.status !== "cancelled" && !c.state.activeSubmission && c.state.status !== "queued") {
           c.state.job.deliveryId = next.id;
           c.state.reason = next.reason;
           c.state.message = next.message || null;
@@ -158,7 +190,66 @@ export const hillclimb = pi({
         }
       }
     },
-    status: (c) => ({ status: c.state.status, waitingHead: c.state.waitingHead, job: c.state.job, lastError: c.state.lastError }),
+    settleJob: async (c, deliveryId: string): Promise<void> => {
+      c.state.transportFailures ??= 0;
+      const job = c.state.job;
+      const submissionId = c.state.activeSubmission;
+      if (!job || job.deliveryId !== deliveryId || !submissionId || c.vars.settling || c.state.status === "cancelled" || c.state.finished.includes(deliveryId)) return;
+      c.vars.settling = true;
+      try {
+        const self = c.client<Registry<{ hillclimb: typeof hillclimb }>>().hillclimb.getForId(c.actorId, { params: internalParams() });
+        try {
+          const result = await readTurnResult(self, submissionId);
+          if (c.state.status === "cancelled" || c.state.activeSubmission !== submissionId) return;
+          if (result.status === "pending") {
+            c.state.transportFailures = 0;
+            c.state.lastError = null;
+            c.state.status = c.state.waitingHead ? "waiting_ci" : "running";
+            // Receipt reconciliation only while an actual inference submission is
+            // active. No GitHub CI polling; terminal waits leave no timer behind.
+            await c.schedule.after(10_000, "settleJob", deliveryId);
+            return;
+          }
+          if (result.status === "unanswered") throw new Error(`Agent did not finish: ${result.reason}`);
+          if (c.state.commentId) await prComment(job, result.text || "Instruction processed.", `reply-${c.state.commentId}`);
+          if (!c.state.waitingHead) {
+            await prComment(job, `**Hillclimb finished this turn.**\n\n${result.text || "No further action reported."}`);
+          }
+          if (c.state.status === "cancelled" || c.state.activeSubmission !== submissionId) return;
+          c.state.status = c.state.waitingHead ? "waiting_ci" : "done";
+          c.state.transportFailures = 0;
+          c.state.lastError = null;
+          c.state.finished = [...c.state.finished.slice(-199), deliveryId];
+          c.state.activeSubmission = null;
+        } catch (error) {
+          if (c.state.status === "cancelled" || c.state.activeSubmission !== submissionId) return;
+          c.state.lastError = error instanceof Error ? error.message : String(error);
+          if (isTransportFailure(error) && ++c.state.transportFailures <= 3) {
+            await c.schedule.after(10_000 * c.state.transportFailures, "settleJob", deliveryId);
+            return;
+          }
+          // Keep a transport-failed submission attached so onAnswer/onWake can
+          // reconcile it later, rather than silently launch duplicate inference.
+          if (!isTransportFailure(error)) c.state.activeSubmission = null;
+          c.state.status = "error";
+          c.log.error({ message: "hillclimb settlement failed", error: c.state.lastError, submissionId });
+          await prComment(job, `**Hillclimb error:** ${c.state.lastError}`).catch(() => undefined);
+        }
+        if (c.state.activeSubmission || c.state.status === "cancelled") return;
+        const next = c.state.pending.shift();
+        if (next) {
+          job.deliveryId = next.id;
+          c.state.reason = next.reason;
+          c.state.message = next.message || null;
+          c.state.commentId = next.commentId || null;
+          c.state.waitingHead = null;
+          c.state.transportFailures = 0;
+          c.state.status = "queued";
+          await c.schedule.after(0, "runJob", next.id);
+        }
+      } finally { c.vars.settling = false; }
+    },
+    status: (c) => ({ activeSubmission: c.state.activeSubmission, status: c.state.status, waitingHead: c.state.waitingHead, job: c.state.job, lastError: c.state.lastError }),
   },
 });
 export function hillclimbPrompt(job: HillclimbJob, reason = "label") {
