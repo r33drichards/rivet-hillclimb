@@ -7,6 +7,10 @@ export const CiWaitContext = defineDoc({
   checkpointWhen: () => true,
 });
 export interface WaitIntent { runId: string; id: string; head: string }
+/** Copy fields while a transaction's document overlay is still open. */
+export function copyWaitIntent(intent: WaitIntent | null): WaitIntent | null {
+  return intent ? { runId: intent.runId, id: intent.id, head: intent.head } : null;
+}
 export interface WaitState { status: string; waitingHead: string | null; appliedWaitIntent?: string | null }
 /** Called only for a terminal submission, including recovery after a controller restart. */
 export function restoreCiWait(state: WaitState, runId: string, intent: WaitIntent | null): boolean {

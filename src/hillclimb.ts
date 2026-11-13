@@ -1,4 +1,4 @@
-import { CiWaitContext, restoreCiWait, recordCiWait } from "./wait-intent.js";
+import { CiWaitContext, restoreCiWait, recordCiWait, copyWaitIntent } from "./wait-intent.js";
 import { enqueueProgress, deliverProgress } from "./progress-comments.js";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { ForwardCommentContext, type ProgressComment } from "./hooks/forward-comment.js";
@@ -262,7 +262,7 @@ export const hillclimb = pi({
             return;
           }
           if (result.status === "unanswered") throw new Error(`Agent did not finish: ${result.reason}`);
-          const intent = await c.pi.commit(async tx => (await tx.doc(CiWaitContext)).request, BACKGROUND_CONTEXT);
+          const intent = await c.pi.commit(async tx => copyWaitIntent((await tx.doc(CiWaitContext)).request), BACKGROUND_CONTEXT);
           if (c.state.status === "cancelled" || c.state.activeSubmission !== submissionId) return;
           if (restoreCiWait(c.state, deliveryId, intent)) {
             await prComment(job, `**Hillclimb waiting for CI** on \`${intent!.head}\`. I’ll resume when current-head checks finish. Remove the label to cancel; use \`/hillclimb <message>\` to talk to me.`);

@@ -1,6 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { restoreCiWait, recordCiWait, type WaitIntent } from "../src/wait-intent.js";
+import { restoreCiWait, recordCiWait, copyWaitIntent, type WaitIntent } from "../src/wait-intent.js";
+
+test("wait intent is detached before the transaction overlay closes", () => {
+  const overlay = Proxy.revocable({ runId: "run", id: "run:call", head: "head" }, {});
+  const intent = copyWaitIntent(overlay.proxy);
+  overlay.revoke();
+  assert.throws(() => overlay.proxy.head);
+  const state = { status: "running", waitingHead: null as string | null };
+  assert.equal(restoreCiWait(state, "run", intent), true);
+  assert.equal(state.waitingHead, "head");
+  assert.equal(copyWaitIntent(null), null);
+});
 
 test("terminal recovery restores a durable tool wait and replays its receipt idempotently", () => {
   const state = { status: "running", waitingHead: null as string | null, appliedWaitIntent: null as string | null };
