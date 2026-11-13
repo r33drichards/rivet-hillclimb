@@ -1,3 +1,4 @@
+import { CiWaitContext, restoreCiWait, recordCiWait } from "./wait-intent.js";
 import { enqueueProgress, deliverProgress } from "./progress-comments.js";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { ForwardCommentContext, type ProgressComment } from "./hooks/forward-comment.js";
@@ -27,16 +28,24 @@ tools.install(defineExtension({ name: "hillclimb-code-mode", sections: [section(
   parameters: obj({ code: str() }), replay: "unsafe", executionMode: "sequential",
   execute: async ({ code }, api) => {
     const client = createClient<Registry<{ mcpJs: typeof mcpJs }>>();
-    const key = ["hillclimb", actorId(api.env!.id)];
-    const result = await client.mcpJs.getOrCreate(key, { params: internalParams() }).callTool("run_js", { code }, api.callId);
-    return { output: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    try {
+      const key = ["hillclimb", actorId(api.env!.id)];
+      const result = await client.mcpJs.getOrCreate(key, { params: internalParams() }).callTool("run_js", { code }, api.callId);
+      return { output: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    } finally {
+      await client.dispose();
+    }
   },
 }), defineTool({
   name: "wait_for_ci", description: "Persist the PR head to await, then release this runner to sleep. Call after a push or when checks are pending, and finish your answer immediately. CI completion/conflicts wake the actor.",
   parameters: obj({ head: str() }), replay: "safe",
-  execute: async ({ head }, api) => {
-    const client = createClient();
-    await client.hillclimb.getForId(actorId(api.env!.id), { params: internalParams() }).waitForCi(head);
+  execute: async ({ head }, api, context) => {
+    const run = await api.snapshot(CiWaitContext, context);
+    if (!run?.runId) throw new Error("No active hillclimb run");
+    await api.commit(async tx => {
+      const doc = await tx.doc(CiWaitContext);
+      recordCiWait(doc, run.runId, api.callId, head);
+    }, context);
     return { output: [{ type: "text" as const, text: "CI wait saved. End this turn now; the actor will sleep and resume on an event." }] };
   },
 })] }));
@@ -47,7 +56,7 @@ export const hillclimb = pi({
   credentials: (c) => c.client<Registry<{ credentials: typeof credentials }>>()
     .credentials.getOrCreate([process.env.HILLCLIMB_USER_ID || "owner"], { params: internalParams() }),
   state: { job: null as HillclimbJob | null, status: "idle", finished: [] as string[], lastError: null as string | null,
-    waitingHead: null as string | null, pending: [] as { id: string; reason: string; message?: string; commentId?: number }[], reason: "label", message: null as string | null, commentId: null as number | null, activeSubmission: null as SubmissionId | null, transportFailures: 0, progressQueue: [] as ProgressComment[], progressSeen: [] as string[] },
+    waitingHead: null as string | null, appliedWaitIntent: null as string | null, pending: [] as { id: string; reason: string; message?: string; commentId?: number }[], reason: "label", message: null as string | null, commentId: null as number | null, activeSubmission: null as SubmissionId | null, transportFailures: 0, progressQueue: [] as ProgressComment[], progressSeen: [] as string[] },
   createVars: () => ({ running: false, settling: false, flushingProgress: false }),
   onBeforeConnect: authorize,
   options: { actionTimeout: 30 * 60_000, sleepTimeout: 5_000 },
@@ -141,7 +150,7 @@ export const hillclimb = pi({
       // Close the race where CI completed before the agent saved its wait.
       const job = c.state.job;
       if (job) await prComment(job, `**Hillclimb waiting for CI** on \`${head}\`. I’ll resume when current-head checks finish. Remove the label to cancel; use \`/hillclimb <message>\` to talk to me.`);
-      if (job) await createClient().hillclimbRepo.getOrCreate([job.owner, job.repo], { params: internalParams() }).receive({
+      if (job) await c.client().hillclimbRepo.getOrCreate([job.owner, job.repo], { params: internalParams() }).receive({
         kind: "signal", signal: { owner: job.owner, repo: job.repo, installationId: job.installationId,
           deliveryId: `wait:${head}`, reason: "ci_completed", headSha: head },
       });
@@ -169,6 +178,10 @@ export const hillclimb = pi({
         }
         if (pr.head.repo?.full_name?.toLowerCase() !== `${job.owner}/${job.repo}`.toLowerCase()) throw new Error("This installation cannot write to the fork's branch.");
         const self = c.client<Registry<{ hillclimb: typeof hillclimb }>>().hillclimb.getForId(c.actorId, { params: internalParams() });
+        await c.pi.commit(async tx => {
+          const doc = await tx.doc(CiWaitContext);
+          if (doc.runId !== deliveryId) { doc.runId = deliveryId; doc.request = null; }
+        }, BACKGROUND_CONTEXT);
         const existing = (await self.harness.inspect()).submissions.find(s => s.requestId === deliveryId);
         if (c.state.status === "cancelled") return;
         if (existing) {
@@ -241,6 +254,16 @@ export const hillclimb = pi({
             return;
           }
           if (result.status === "unanswered") throw new Error(`Agent did not finish: ${result.reason}`);
+          const intent = await c.pi.commit(async tx => (await tx.doc(CiWaitContext)).request, BACKGROUND_CONTEXT);
+          if (c.state.status === "cancelled" || c.state.activeSubmission !== submissionId) return;
+          if (restoreCiWait(c.state, deliveryId, intent)) {
+            await prComment(job, `**Hillclimb waiting for CI** on \`${intent!.head}\`. I’ll resume when current-head checks finish. Remove the label to cancel; use \`/hillclimb <message>\` to talk to me.`);
+            if (c.state.status === "cancelled" || c.state.activeSubmission !== submissionId) return;
+            await c.client().hillclimbRepo.getOrCreate([job.owner, job.repo], { params: internalParams() }).receive({
+              kind: "signal", signal: { owner: job.owner, repo: job.repo, installationId: job.installationId,
+                deliveryId: `wait:${intent!.head}`, reason: "ci_completed", headSha: intent!.head },
+            });
+          }
           if (c.state.commentId) await prComment(job, result.text || "Instruction processed.", `reply-${c.state.commentId}`);
           if (!c.state.waitingHead) {
             await prComment(job, `**Hillclimb finished this turn.**\n\n${result.text || "No further action reported."}`);
