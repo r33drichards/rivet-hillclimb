@@ -62,7 +62,15 @@ export const hillclimb = pi({
   options: { actionTimeout: 30 * 60_000, sleepTimeout: 5_000 },
   onWake: async (c) => {
     if (c.state.status === "cancelled") return;
-    if (c.state.job) await c.pi.commit(async tx => { (await tx.doc(ForwardCommentContext)).actorId = c.actorId; }, BACKGROUND_CONTEXT);
+    if (c.state.job) await c.pi.commit(async tx => {
+      (await tx.doc(ForwardCommentContext)).actorId = c.actorId;
+      // Existing submissions may resume across deployment of local CI intents.
+      const wait = await tx.doc(CiWaitContext);
+      if (wait.runId !== c.state.job!.deliveryId) {
+        wait.runId = c.state.job!.deliveryId;
+        wait.request = null;
+      }
+    }, BACKGROUND_CONTEXT);
     if (c.state.progressQueue?.length) await c.schedule.after(0, "flushProgress");
     if (c.state.activeSubmission) await c.schedule.after(0, "settleJob", c.state.job!.deliveryId);
     else if (c.state.job && (["queued", "running"].includes(c.state.status) || (c.state.status === "error" && isTransportFailure(c.state.lastError)))) await c.schedule.after(0, "runJob", c.state.job.deliveryId);
