@@ -2,7 +2,7 @@ import { createServer, type Server as HttpServer } from "node:http";
 import { prepareRepository } from "./repository.js";
 import type { HillclimbJob } from "./github.js";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, stat, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -12,10 +12,38 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const exec = promisify(execFile);
 export const MAX_ARCHIVE_BYTES = 32 * 1024 * 1024;
+export class SessionCheckpointTooLargeError extends Error {
+  constructor(bytes: number, limit: number) {
+    super(`Session checkpoint is ${(bytes / 1024 / 1024).toFixed(1)} MiB; limit is ${limit / 1024 / 1024} MiB after removing obsolete heaps.`);
+    this.name = "SessionCheckpointTooLargeError";
+  }
+}
+
+/** V8 heaps are complete immutable images, not deltas. Retain the one we restore.
+ * Keep session/execution databases, native repo files, .git, and all other stores:
+ * their references/artifacts need not be understood or rewritten by this bridge.
+ */
+export async function compactRuntimeHeaps(data: string): Promise<number> {
+  let latest: string;
+  try { latest = (await readFile(join(data, "latest-heap"), "utf8")).trim(); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0; throw error; }
+  if (!/^[0-9a-f]{64}$/.test(latest)) throw new Error("Invalid latest heap reference in session checkpoint.");
+  const heaps = join(data, "heaps");
+  if (!(await stat(join(heaps, latest))).isFile()) throw new Error("Latest session heap is missing.");
+  let removed = 0;
+  for (const entry of await readdir(heaps, { withFileTypes: true })) {
+    if (entry.isFile() && /^[0-9a-f]{64}$/.test(entry.name) && entry.name !== latest) {
+      await rm(join(heaps, entry.name));
+      removed++;
+    }
+  }
+  return removed;
+}
+
 
 // Each invocation starts from the last committed checkpoint. No worker-local
 // path is authoritative, and a failed call cannot corrupt the saved session.
-export async function invokeRuntime(snapshot: Uint8Array | undefined, name: string, args: Record<string, unknown>, options?: { signal?: AbortSignal; repository?: { job: HillclimbJob; token: string } }) {
+export async function invokeRuntime(snapshot: Uint8Array | undefined, name: string, args: Record<string, unknown>, options?: { signal?: AbortSignal; repository?: { job: HillclimbJob; token: string }; onPhase?: (phase: string, metadata?: Record<string, number>) => void }) {
   const directory = await mkdtemp(join(tmpdir(), "rivet-mcp-"));
   const archive = join(directory, "checkpoint.tgz");
   const data = join(directory, "data");
@@ -27,12 +55,16 @@ export async function invokeRuntime(snapshot: Uint8Array | undefined, name: stri
   options?.signal?.addEventListener("abort", abort, { once: true });
   try {
     options?.signal?.throwIfAborted();
+    options?.onPhase?.("restore", { bytes: snapshot?.byteLength || 0 });
     if (snapshot) {
       await writeFile(archive, snapshot);
       await exec("tar", ["-xzf", archive, "-C", directory]);
     }
     const { mkdir } = await import("node:fs/promises");
     await mkdir(data, { recursive: true });
+    // Compact legacy checkpoints before launching V8 as well as before saving.
+    const restoredHeapsRemoved = await compactRuntimeHeaps(data);
+    options?.onPhase?.("prepare", { obsoleteHeapsRemoved: restoredHeapsRemoved });
     const extraArgs: string[] = [];
     if (options?.repository) {
       const { job, token } = options.repository;
@@ -92,7 +124,9 @@ async function pre(input) {
     transport.stderr?.on("data", (chunk) => { stderr = (stderr + chunk).slice(-4000); });
     try {
       options?.signal?.throwIfAborted();
+      options?.onPhase?.("runtime_start");
       await client.connect(transport, { timeout: 30_000 });
+      options?.onPhase?.("execute");
       let result: unknown;
       if (name === "__list_tools") result = await client.listTools();
       else {
@@ -119,11 +153,16 @@ async function pre(input) {
       }
       await client.close();
       transport = undefined;
+      const obsoleteHeapsRemoved = await compactRuntimeHeaps(data);
+      options?.onPhase?.("archive", { obsoleteHeapsRemoved });
       await exec("tar", ["-czf", archive, "-C", directory, "data"], { maxBuffer: 1024 * 1024 });
       const checkpoint = await readFile(archive);
-      if (checkpoint.length > (options?.repository ? 128 * 1024 * 1024 : MAX_ARCHIVE_BYTES)) throw new Error("Session checkpoint exceeds its size limit.");
+      options?.onPhase?.("archive_ready", { bytes: checkpoint.length });
+      const limit = options?.repository ? 128 * 1024 * 1024 : MAX_ARCHIVE_BYTES;
+      if (checkpoint.length > limit) throw new SessionCheckpointTooLargeError(checkpoint.length, limit);
       return { result, checkpoint };
     } catch (error) {
+      if (error instanceof SessionCheckpointTooLargeError) throw error;
       throw new Error(`${error instanceof Error ? error.message : error}${stderr ? `\n${stderr}` : ""}`);
     }
   } finally {
