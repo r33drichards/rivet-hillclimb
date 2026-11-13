@@ -1,3 +1,4 @@
+import { exclusiveWorkspaceCall, type ActiveWorkspaceCall } from "./workspace-call.js";
 import { githubToken, GITHUB_OWNER, type HillclimbJob } from "./github.js";
 import { actor, UserError } from "rivetkit";
 import { db } from "rivetkit/db";
@@ -12,14 +13,17 @@ export interface CheckpointDatabase {
   execute(sql: string, ...params: any[]): Promise<any>;
   transaction<T>(fn: (tx: Pick<CheckpointDatabase, "execute">) => Promise<T>, options: { name: string }): Promise<T>;
 }
-export async function readCheckpoint(database: Pick<CheckpointDatabase, "execute">): Promise<Buffer | undefined> {
+export async function readCheckpoint(database: Pick<CheckpointDatabase, "execute">, signal?: AbortSignal): Promise<Buffer | undefined> {
+  signal?.throwIfAborted();
   const heads = await database.execute("SELECT generation FROM checkpoint_head WHERE id = 1") as { generation: string }[];
+  signal?.throwIfAborted();
   const buffers: Buffer[] = [];
   let nextPart = 0;
   while (true) {
     const rows = (heads[0]
       ? await database.execute("SELECT part, data FROM checkpoint_chunk WHERE generation = ? AND part >= ? ORDER BY part LIMIT ?", heads[0].generation, nextPart, CHECKPOINT_READ_PARTS)
       : await database.execute("SELECT part, data FROM checkpoint WHERE part >= ? ORDER BY part LIMIT ?", nextPart, CHECKPOINT_READ_PARTS)) as { part: number; data: string }[];
+    signal?.throwIfAborted();
     if (!rows.length) break;
     for (const row of rows) {
       if (row.part !== nextPart++) throw new Error("Session checkpoint is incomplete.");
@@ -42,14 +46,18 @@ export async function writeCheckpoint(database: CheckpointDatabase, checkpoint: 
         values.push(generation, part, encoded.slice(offset, offset + CHECKPOINT_PART_CHARS));
       }
       await database.execute(`INSERT INTO checkpoint_chunk (generation, part, data) VALUES ${rows.join(", ")}`, ...values);
+      signal?.throwIfAborted();
     }
     signal?.throwIfAborted();
     // Publish the checkpoint and receipt together; never garbage-collect the
     // previous generation until this pointer swap is durable.
     await database.transaction(async tx => {
       await tx.execute("INSERT OR IGNORE INTO checkpoint_retired (generation) SELECT generation FROM checkpoint_head WHERE id = 1 AND generation != ?", generation);
+      signal?.throwIfAborted();
       await tx.execute("INSERT INTO checkpoint_head (id, generation) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET generation = excluded.generation", generation);
+      signal?.throwIfAborted();
       if (requestId) await tx.execute("INSERT INTO receipt (id, result) VALUES (?, ?)", requestId, JSON.stringify(result));
+      signal?.throwIfAborted();
     }, { name: "mcp.checkpoint.publish" });
     return generation;
   } catch (error) {
@@ -81,7 +89,7 @@ export const mcpJs = actor({
   } }),
   state: { repository: null as HillclimbJob | null, cancelled: false,
     checkpointBytes: null as number | null, checkpointParts: null as number | null, phase: "idle", lastError: null as string | null },
-  createVars: () => ({ busy: false, controller: undefined as AbortController | undefined }),
+  createVars: () => ({ busy: false, controller: undefined as AbortController | undefined, active: undefined as ActiveWorkspaceCall | undefined }),
   onBeforeConnect: authorize,
   options: { actionTimeout: 240_000, sleepTimeout: 5_000 },
   actions: {
@@ -95,46 +103,48 @@ export const mcpJs = actor({
     cancel: (c) => { c.state.cancelled = true; c.vars.controller?.abort(); },
     callTool: async (c, name: string, args: Record<string, unknown>, requestId?: string) => {
       if (c.state.cancelled) throw new UserError("Hillclimb workspace was cancelled.");
-      if (c.vars.busy) throw new UserError("A tool call is already running for this session.");
       if (!["run_js", "__list_tools"].includes(name)) throw new UserError("Unsupported tool.");
-      c.vars.busy = true;
-      c.state.phase = "receipt";
-      c.state.lastError = null;
-      c.vars.controller = new AbortController();
-      try {
-        return await c.keepAwake((async () => {
-          // Receipts make the agent's interrupted tool calls safe to retry.
-          if (requestId) {
-            const rows = await c.db.execute("SELECT result FROM receipt WHERE id = ?", requestId) as { result: string }[];
-            if (rows[0]) { c.state.phase = "done"; return JSON.parse(rows[0].result); }
-          }
-          c.state.phase = "read_checkpoint";
-          const snapshot = await readCheckpoint(c.db);
-          c.state.checkpointBytes = snapshot?.length || 0;
-          c.log.info({ message: "Workspace checkpoint restored", bytes: c.state.checkpointBytes });
-          const { result, checkpoint } = await invokeRuntime(snapshot, name, args, { signal: c.vars.controller!.signal,
-            onPhase: (phase, metadata) => { c.state.phase = phase; if (metadata) c.log.info({ message: "Workspace runtime phase", phase, ...metadata }); },
-            ...(c.state.repository ? { repository: { job: c.state.repository, token: await githubToken(c.state.repository) } } : {}) });
-          if (c.state.cancelled) throw new UserError("Hillclimb workspace was cancelled.");
-          c.state.phase = "persist_checkpoint";
-          await writeCheckpoint(c.db, checkpoint, result, requestId, c.vars.controller!.signal);
-          c.state.checkpointBytes = checkpoint.length;
-          c.state.checkpointParts = Math.ceil((4 * Math.ceil(checkpoint.length / 3)) / CHECKPOINT_PART_CHARS);
-          c.state.phase = "done";
-          c.log.info({ message: "Workspace checkpoint saved", bytes: checkpoint.length, parts: c.state.checkpointParts });
-          return result;
-        })());
-      } catch (error) {
-        const known = error instanceof SessionCheckpointTooLargeError;
-        c.state.lastError = known ? error.message : `Workspace ${c.state.phase} failed (${error instanceof Error ? error.name : "error"}).`;
-        const details = (error instanceof Error ? error.message : String(error)).replace(/(?:cloud_api_|gh[pous]_|sk_)[A-Za-z0-9_-]+/g, "[redacted]");
-        c.log.error({ message: "Workspace tool failed", phase: c.state.phase, checkpointBytes: c.state.checkpointBytes, checkpointParts: c.state.checkpointParts, details });
-        throw new UserError(c.state.lastError);
-      } finally {
-        c.vars.busy = false;
-        c.vars.controller = undefined;
-        await c.schedule.after(0, "garbageCollect").catch(() => undefined);
-      }
+      return exclusiveWorkspaceCall(c.vars, requestId, name, c.abortSignal, async signal => {
+        c.state.phase = "receipt";
+        c.state.lastError = null;
+        try {
+          return await c.keepAwake((async () => {
+            // Receipts make the agent's interrupted tool calls safe to retry.
+            if (requestId) {
+              const rows = await c.db.execute("SELECT result FROM receipt WHERE id = ?", requestId) as { result: string }[];
+              signal.throwIfAborted();
+              if (rows[0]) { c.state.phase = "done"; return JSON.parse(rows[0].result); }
+            }
+            c.state.phase = "read_checkpoint";
+            const snapshot = await readCheckpoint(c.db, signal);
+            signal.throwIfAborted();
+            c.state.checkpointBytes = snapshot?.length || 0;
+            c.log.info({ message: "Workspace checkpoint restored", bytes: c.state.checkpointBytes });
+            const token = c.state.repository ? await githubToken(c.state.repository) : undefined;
+            signal.throwIfAborted();
+            const { result, checkpoint } = await invokeRuntime(snapshot, name, args, { signal,
+              onPhase: (phase, metadata) => { c.state.phase = phase; if (metadata) c.log.info({ message: "Workspace runtime phase", phase, ...metadata }); },
+              ...(c.state.repository ? { repository: { job: c.state.repository, token: token! } } : {}) });
+            signal.throwIfAborted();
+            if (c.state.cancelled) throw new UserError("Hillclimb workspace was cancelled.");
+            c.state.phase = "persist_checkpoint";
+            await writeCheckpoint(c.db, checkpoint, result, requestId, signal);
+            c.state.checkpointBytes = checkpoint.length;
+            c.state.checkpointParts = Math.ceil((4 * Math.ceil(checkpoint.length / 3)) / CHECKPOINT_PART_CHARS);
+            c.state.phase = "done";
+            c.log.info({ message: "Workspace checkpoint saved", bytes: checkpoint.length, parts: c.state.checkpointParts });
+            return result;
+          })());
+        } catch (error) {
+          const known = error instanceof SessionCheckpointTooLargeError;
+          c.state.lastError = known ? error.message : `Workspace ${c.state.phase} failed (${error instanceof Error ? error.name : "error"}).`;
+          const details = (error instanceof Error ? error.message : String(error)).replace(/(?:cloud_api_|gh[pous]_|sk_)[A-Za-z0-9_-]+/g, "[redacted]");
+          c.log.error({ message: "Workspace tool failed", phase: c.state.phase, checkpointBytes: c.state.checkpointBytes, checkpointParts: c.state.checkpointParts, details });
+          throw new UserError(c.state.lastError);
+        } finally {
+          await c.schedule.after(0, "garbageCollect").catch(() => undefined);
+        }
+      }, () => new UserError("A tool call is already running for this session."));
     },
     garbageCollect: async (c): Promise<void> => {
       try {
@@ -145,6 +155,8 @@ export const mcpJs = actor({
       }
     },
     status: async (c) => ({
+      busy: c.vars.busy, activeRequestId: c.vars.active?.requestId ?? null,
+      activeTool: c.vars.active?.name ?? null, activeStartedAt: c.vars.active?.startedAt ?? null,
       checkpointParts: c.state.checkpointParts ?? (await c.db.execute("SELECT COUNT(*) AS parts FROM checkpoint_chunk WHERE generation = (SELECT generation FROM checkpoint_head WHERE id = 1)") as { parts: number }[])[0]?.parts ?? 0,
       checkpointBytes: c.state.checkpointBytes ?? null, phase: c.state.phase ?? "idle", lastError: c.state.lastError ?? null,
     }),
