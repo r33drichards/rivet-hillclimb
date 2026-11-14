@@ -26,15 +26,22 @@ test("coordinator only wakes for current-head terminal CI or confirmed new confl
   const definition = createRepoCoordinator(fakeApi).config;
   // Mock only Rivet's transport/scheduler boundaries. Exercise the actual
   // persisted coordinator state and action handlers with GitHub event fixtures.
+  const scheduled: { delay: number; action: string }[] = [];
   const context: any = {
     state: { jobs: {}, queue: [], lastConflict: {}, nextProbeAt: 0 }, vars: { processing: false }, key: [job.owner, job.repo],
-    schedule: { after: async () => "scheduled" }, log: { error: (e: unknown) => { throw new Error(JSON.stringify(e)); } },
+    schedule: { after: async (delay: number, action: string) => { scheduled.push({ delay, action }); return "scheduled"; } }, log: { error: (e: unknown) => { throw new Error(JSON.stringify(e)); } },
     client: () => ({ hillclimb: { getOrCreate: () => runner } }),
   };
   const actions = definition.actions!;
   const receive = async (input: any) => { await actions.receive(context, input); await actions.drain(context); };
   const signal = (reason: "ci_completed" | "pr_changed", id: string, headSha = "head") => receive({ kind: "signal", signal: { owner: job.owner, repo: job.repo, installationId: 1, deliveryId: id, reason, headSha, number: 1 } });
   await receive({ kind: "label", job });
+  assert.deepEqual(scheduled, [{ delay: 0, action: "drain" }], "tracking a PR must not schedule periodic probes");
+  scheduled.length = 0;
+  await definition.onWake!(context);
+  await actions.probe();
+  assert.deepEqual(scheduled, [], "waking and legacy probe alarms must not restart polling");
+  assert.equal(context.state.queue.length, 0, "legacy probes must not enqueue GitHub work");
   await signal("ci_completed", "partial");
   assert.equal(observed.visits, 0, "partial CI must not even contact the runner");
   complete = true;

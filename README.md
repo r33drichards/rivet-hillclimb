@@ -13,7 +13,7 @@ The private GitHub App is installed on all current and future r33drichards repos
 
 ## PR controls
 
-Apply `codex-hillclimb` as r33drichards to start. Removing it or closing the PR cancels the agent, aborts active inference/workspace execution, clears queued wakeups, and stops conflict probes. Re-add the label to restart. Already-pushed commits and GitHub Actions jobs remain.
+Apply `codex-hillclimb` as r33drichards to start. Removing it or closing the PR cancels the agent, aborts active inference/workspace execution, and clears queued wakeups. Re-add the label to restart. Already-pushed commits and GitHub Actions jobs remain.
 
 The app maintains a status comment for running, waiting for CI, finished, error, and cancelled states. As r33drichards, post a new top-level PR comment:
 
@@ -31,11 +31,11 @@ Only new owner comments are commands; edited comments, bot comments, other users
 3. The PR runner restores its conversation and mcp-js workspace, diagnoses CI, edits files, and pushes a focused change.
 4. It calls `wait_for_ci` with the new head SHA and ends the turn. The runner and workspace actors sleep after five seconds of inactivity.
 5. GitHub completion events reach the coordinator. It verifies the current PR head and that all observed checks/workflows are terminal before waking the runner. Stale SHA and partial completion events do not contact the runner.
-6. The coordinator checks mergeability once per minute while a labeled PR is tracked. Only `mergeable === false` wakes a conflict-resolution turn, once per head/base pair. Unknown mergeability or a moved base alone does not wake inference.
+6. The coordinator checks mergeability when relevant GitHub events arrive. Only `mergeable === false` wakes a conflict-resolution turn, once per head/base pair. Unknown mergeability or a moved base alone does not wake inference.
 
 **`push` is never subscribed to or used as a wake trigger.** PR metadata changes may request a conflict check, but the runner's own push cannot start another model turn by itself. A completion check immediately after saving a wait closes the race where CI finishes before the actor records its waiting head.
 
-The coordinator's brief mergeability checks use no model or workspace. It sleeps between scheduled probes. This is necessary because GitHub does not provide a dedicated "merge conflicts appeared" webhook.
+The coordinator has no periodic conflict polling. It sleeps until a GitHub event arrives (or failed event processing needs a retry). GitHub does not provide a dedicated "merge conflicts appeared" webhook, so a conflict caused by a base-branch change may remain undetected until a later relevant event. Previously scheduled probes are consumed without further work or rescheduling.
 
 ## mcp-js repository environment
 

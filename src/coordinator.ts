@@ -7,13 +7,12 @@ import { ciReady, githubApi, GITHUB_OWNER, TRIGGER_LABEL, type HillclimbJob, typ
 export function createRepoCoordinator(api = githubApi, comment = prComment) {
 return actor({
   state: { jobs: {} as Record<string, HillclimbJob>, queue: [] as ({ kind: "label"; job: HillclimbJob } | { kind: "signal"; signal: GitHubSignal })[],
-    lastConflict: {} as Record<string, string>, handledSignals: [] as string[], nextProbeAt: 0 },
+    lastConflict: {} as Record<string, string>, handledSignals: [] as string[] },
   createVars: () => ({ processing: false }),
   onBeforeConnect: authorize,
   options: { sleepTimeout: 5_000, actionTimeout: 120_000 },
   onWake: async (c) => {
     if (c.state.queue.length) await c.schedule.after(0, "drain");
-    if (Object.keys(c.state.jobs).length && c.state.nextProbeAt <= Date.now()) await c.schedule.after(0, "probe");
   },
   actions: {
     status: (c) => ({ queued: c.state.queue.length, tracking: Object.keys(c.state.jobs) }),
@@ -108,22 +107,11 @@ return actor({
         await c.schedule.after(30_000, "drain");
       } finally {
         c.vars.processing = false;
-        if (Object.keys(c.state.jobs).length && c.state.nextProbeAt <= Date.now()) {
-          c.state.nextProbeAt = Date.now() + 60_000;
-          await c.schedule.after(60_000, "probe");
-        }
       }
     },
-    probe: async (c): Promise<void> => {
-      // Only this lightweight coordinator wakes on a timer. The model runner and
-      // mcp-js workspace stay asleep unless CI is ready or a conflict is confirmed.
-      c.state.nextProbeAt = 0;
-      for (const job of Object.values(c.state.jobs)) {
-        c.state.queue.push({ kind: "signal", signal: { owner: job.owner, repo: job.repo, installationId: job.installationId,
-          deliveryId: `probe:${job.number}:${Date.now()}`, reason: "pr_changed", number: job.number } });
-      }
-      await c.schedule.after(0, "drain");
-    },
+    // Older deployments may have persisted probe alarms. Consume them without
+    // contacting GitHub or scheduling another wakeup.
+    probe: async (): Promise<void> => {},
   },
 });
 
